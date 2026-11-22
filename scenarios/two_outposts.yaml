@@ -1,0 +1,48 @@
+# Two outposts, each hidden on a rock in its own asteroid cluster, 3e8 m apart.
+# Every value below is a design choice, not sourced data. Change any of them and
+# re-run to measure the effect. Units are in each field's description in
+# src/swarmsim/scenario/schema.py. Ranges are enforced when the file loads.
+name: two_outposts
+c: 299792458.0        # speed of light [m/s]
+duration: 172800.0    # 48 hours [s]
+
+map:
+  separation: 3.0e+8        # distance between the two home clusters [m]
+  cluster_radius: 2.0e+6    # radius of every cluster [m]
+  rock_radius_min: 1.0e+3   # [m]
+  rock_radius_max: 5.0e+4   # [m]
+  home_rocks: 60            # rocks in each home cluster
+  hide_candidates: 40       # outpost hides on one of the first 40 home rocks
+  mid_clusters: 2           # extra clusters between each home cluster and the middle
+  mid_rocks: 30             # rocks in each extra cluster
+  mid_lateral: 1.0e+7       # extra clusters sit within +-this off the x axis [m]
+  outpost_clearance: 100.0  # gap between outpost or ship and any rock surface [m]
+  ship_spread: 2.0e+4       # ships start within this far beyond the outpost [m]
+
+# Delta-v is ve * ln(1 + fuel / dry). One 3e8 m crossing at 1 m/s2 (accelerate to the
+# midpoint, then brake) needs about 34.6 km/s; both classes carry more than that.
+ship_classes:
+  scout:             # lighter, more delta-v (about 53.8 km/s)
+    dry_mass: 200.0
+    fuel_mass: 1000.0
+    max_acc: 1.0
+    ve: 30000.0
+    radius: 5.0
+  attacker:          # heavier (about 41.6 km/s)
+    dry_mass: 1000.0
+    fuel_mass: 3000.0
+    max_acc: 1.0
+    ve: 30000.0
+    radius: 10.0
+
+blue: &team
+  outpost:           # fuel and max_acc must stay 0: an outpost never moves
+    dry_mass: 1000000.0
+    fuel_mass: 0.0
+    max_acc: 0.0
+    ve: 30000.0
+    radius: 100.0
+  groups:
+    - {ship_class: scout, count: 2, initial_speed: 0.0}
+    - {ship_class: attacker, count: 2, initial_speed: 0.0}
+red: *team

@@ -27,6 +27,8 @@ from swarmsim.core.segments import SegmentStore, _time, _vec3
 # Priorities within one microsecond.
 _COLLISION, _FUEL_OUT, _COMMAND = 0, 1, 2
 _ACC_SLACK = 1e-12
+# Largest acceleration a unit may be given [m/s2]; beyond this the float math loses meaning.
+MAX_ACC = 1e9
 _MAX_SPEED_FRACTION = 0.1
 
 _Triple = tuple[float, float, float]
@@ -168,6 +170,8 @@ class World:
         for name, value in (("fuel_mass", fuel), ("max_acc", limit), ("radius", radius)):
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be finite and >= 0, got {value}")
+        if limit > MAX_ACC:
+            raise ValueError(f"max_acc {limit} exceeds the limit {MAX_ACC} m/s2")
         # Every unit must stay slower than light for the light-delay search to hold.
         top_speed = math.hypot(*_triple(v)) + ve * math.log((dry + fuel) / dry)
         if top_speed > _MAX_SPEED_FRACTION * self.c:

@@ -154,6 +154,15 @@ def test_spawn_rejects_bad_values_and_adds_nothing(over: dict[str, Any]) -> None
     assert w.units == []
 
 
+def test_spawn_rejects_acceleration_above_the_module_limit() -> None:
+    assert engine.MAX_ACC == 1e9
+    w = make_world()
+    spawn(w, max_acc=engine.MAX_ACC)
+    with pytest.raises(ValueError, match="max_acc"):
+        spawn(w, max_acc=engine.MAX_ACC * 1.001)
+    assert len(w.store) == 1
+
+
 def test_spawn_allows_zero_fuel_acceleration_and_radius() -> None:
     w = make_world()
     u = spawn(w, fuel_mass=0.0, max_acc=0.0, radius=0.0)
