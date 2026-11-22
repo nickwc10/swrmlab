@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import struct
 from pathlib import Path
 from typing import Any
@@ -75,14 +76,24 @@ def make_run(
     return w, s
 
 
+def seal(payload: bytes) -> bytes:
+    """Append the SHA-256 trailer, so structural tests reach the check they aim at."""
+    return payload + hashlib.sha256(payload).digest()
+
+
 def split(data: bytes) -> tuple[dict[str, Any], bytes]:
+    """Header and section bytes of a good file (trailer dropped)."""
     (n,) = struct.unpack("<I", data[4:8])
-    return json.loads(data[8 : 8 + n]), data[8 + n :]
+    return json.loads(data[8 : 8 + n]), data[8 + n : -32]
+
+
+def raw_file(raw_header: bytes, body: bytes = b"") -> bytes:
+    return seal(b"SWR2" + struct.pack("<I", len(raw_header)) + raw_header + body)
 
 
 def join(header: dict[str, Any], body: bytes, magic: bytes = b"SWR2") -> bytes:
     h = json.dumps(header, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    return magic + struct.pack("<I", len(h)) + h + body
+    return seal(magic + struct.pack("<I", len(h)) + h + body)
 
 
 @pytest.fixture(scope="module")
@@ -159,24 +170,37 @@ def test_events_round_trip(good: tuple[bytes, World, Scenario], tmp_path: Path) 
     assert list(r.events) == w.events
 
 
+@pytest.fixture(scope="module")
+def ended_run() -> tuple[World, Scenario]:
+    s = small_scenario(duration=86_400.0)
+    w, _ = make_run(seed=2, scenario=s, burns=40)
+    assert any(u[4] is not None for u in w.units), "needs a unit lost to a rock"
+    return w, s
+
+
 def test_state_equals_the_store_exactly_at_100_times(
-    good: tuple[bytes, World, Scenario], tmp_path: Path
+    good: tuple[bytes, World, Scenario], ended_run: tuple[World, Scenario], tmp_path: Path
 ) -> None:
-    data, w, _ = good
-    r = read_bytes(tmp_path, data)
+    r_good = read_bytes(tmp_path, good[0])
+    write(tmp_path / "e.swr", *ended_run, 2)
+    runs = [(good[1], r_good), (ended_run[0], read(tmp_path / "e.swr"))]
     rng = np.random.default_rng(3)
     checked = 0
-    for unit, _team, _cls, birth, end in w.units:
-        last = w.horizon_us if end is None else end
-        times = [birth, last, *rng.integers(birth, last + 1, size=20).tolist()]
-        if end is None:
-            times.append(w.horizon_us + 12_345_678)  # a live unit extrapolates
-        for t in times:
-            ps, vs = w.store.state(unit, t)
-            pr, vr = r.state(unit, t)
-            assert ps.tobytes() == pr.tobytes() and vs.tobytes() == vr.tobytes()
-            checked += 1
+    ended_checked = 0
+    for w, r in runs:
+        for unit, _team, _cls, birth, end in w.units:
+            last = w.horizon_us if end is None else end
+            times = [birth, last, *rng.integers(birth, last + 1, size=20).tolist()]
+            if end is None:
+                times.append(w.horizon_us + 12_345_678)  # a live unit extrapolates
+            for t in times:
+                ps, vs = w.store.state(unit, t)
+                pr, vr = r.state(unit, t)
+                assert ps.tobytes() == pr.tobytes() and vs.tobytes() == vr.tobytes()
+                checked += 1
+                ended_checked += end is not None
     assert checked >= 100
+    assert ended_checked >= 10
 
 
 def test_state_rejects_times_and_units_outside_a_units_life(tmp_path: Path) -> None:
@@ -291,19 +315,62 @@ def test_truncation_at_any_length_raises_replay_error(tmp_path: Path) -> None:
             read_bytes(tmp_path, data[:n])
 
 
-def test_flipped_bytes_raise_replay_error_or_load(tmp_path: Path) -> None:
+def test_every_flipped_byte_is_rejected(tmp_path: Path) -> None:
     w, s = make_run(burns=2)
     p = tmp_path / "a.swr"
     write(p, w, s, 1)
     data = p.read_bytes()
     rng = np.random.default_rng(1234)
-    for pos in rng.integers(0, len(data), size=1000).tolist():
+    positions = rng.integers(0, len(data), size=1000).tolist() + [len(data) - 1]
+    for pos in positions:
         bad = bytearray(data)
         bad[pos] ^= int(rng.integers(1, 256))
         try:
-            read_bytes(tmp_path, bytes(bad))
+            r = read_bytes(tmp_path, bytes(bad))
         except ReplayError:
-            pass
+            continue
+        for unit in range(len(r.header["units"])):  # a load must be usable
+            r.state(unit, 0)
+        pytest.fail(f"flip at byte {pos} was accepted")
+
+
+def test_damage_that_keeps_the_structure_is_caught_by_the_checksum(
+    good: tuple[bytes, World, Scenario], tmp_path: Path
+) -> None:
+    h, body = split(good[0])
+    dt = np.dtype(
+        [("unit", "<i4"), ("t0", "<i8"), ("pos", "<f8", (3,)), ("vel", "<f8", (3,)),
+         ("acc", "<f8", (3,))]
+    )  # fmt: skip
+    rows = np.frombuffer(body, dtype=dt).copy()
+    rows["pos"][3, 0] += 1e6  # move one segment 1000 km
+    data = bytearray(good[0])
+    start = len(data) - 32 - len(body)
+    data[start : start + len(body)] = rows.tobytes()
+    with pytest.raises(ReplayError, match="checksum"):
+        read_bytes(tmp_path, bytes(data))
+    # The same edit with a recomputed trailer is structurally fine, so only the trailer stops it.
+    assert read_bytes(tmp_path, seal(bytes(data[:-32]))).header["seed"] == 1
+
+
+def test_non_canonical_headers_are_rejected(
+    good: tuple[bytes, World, Scenario], tmp_path: Path
+) -> None:
+    h, body = split(good[0])
+    canon = json.dumps(h, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    spaced = json.dumps(h, sort_keys=True, ensure_ascii=False).encode()
+    with pytest.raises(ReplayError, match="canonical"):
+        read_bytes(tmp_path, raw_file(spaced, body))
+    dup = canon[:-1] + b',"seed":2}'  # a second seed; the last one wins when parsed
+    with pytest.raises(ReplayError, match="canonical"):
+        read_bytes(tmp_path, raw_file(dup, body))
+    reordered = json.dumps(
+        dict(reversed(h.items())), separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    assert reordered != canon
+    with pytest.raises(ReplayError, match="canonical"):
+        read_bytes(tmp_path, raw_file(reordered, body))
+    assert read_bytes(tmp_path, raw_file(canon, body)).header["seed"] == 1
 
 
 def test_wrong_magic(good: tuple[bytes, World, Scenario], tmp_path: Path) -> None:
@@ -320,20 +387,41 @@ def test_wrong_version(good: tuple[bytes, World, Scenario], tmp_path: Path, vers
 
 
 def test_header_length_beyond_the_file(good: tuple[bytes, World, Scenario], tmp_path: Path) -> None:
-    data = good[0]
-    bad = data[:4] + struct.pack("<I", len(data)) + data[8:]
+    payload = good[0][:-32]
+    bad = seal(payload[:4] + struct.pack("<I", len(payload)) + payload[8:])
     with pytest.raises(ReplayError, match="header"):
         read_bytes(tmp_path, bad)
-    huge = data[:4] + struct.pack("<I", 0xFFFFFFFF) + data[8:]
+    huge = seal(payload[:4] + struct.pack("<I", 0xFFFFFFFF) + payload[8:])
     with pytest.raises(ReplayError):
         read_bytes(tmp_path, huge)
+    with pytest.raises(ReplayError, match="checksum"):
+        read_bytes(tmp_path, payload[:4] + struct.pack("<I", 0xFFFFFFFF) + good[0][8:])
 
 
 def test_invalid_utf8_and_json(tmp_path: Path) -> None:
-    for raw in (b"\xff\xfe\xfd", b"{not json", b"[1,2]", b'{"a":NaN}', b"[" * 100_000):
-        data = b"SWR2" + struct.pack("<I", len(raw)) + raw
+    for raw in (b"\xff\xfe\xfd", b"{not json", b"[1,2]", b"[" * 100_000):
         with pytest.raises(ReplayError):
-            read_bytes(tmp_path, data)
+            read_bytes(tmp_path, raw_file(raw))
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999", "1E400"])
+@pytest.mark.parametrize("where", ["seed", "acc", "radii", "scenario"])
+def test_non_finite_numbers_in_an_otherwise_valid_header(
+    good: tuple[bytes, World, Scenario], tmp_path: Path, literal: str, where: str
+) -> None:
+    h, body = split(good[0])
+    raw = json.dumps(h, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    patterns = {
+        "seed": (r'"seed":\d+', f'"seed":{literal}'),
+        "acc": (r'"acc":\[[^,\]]+', f'"acc":[{literal}'),
+        "radii": (r'"radii":\[[^,\]]+', f'"radii":[{literal}'),
+        "scenario": (r'"duration":[^,}]+', f'"duration":{literal}'),
+    }
+    pattern, replacement = patterns[where]
+    bad, n = re.subn(pattern, replacement, raw, count=1)
+    assert n == 1
+    with pytest.raises(ReplayError, match="finite|not allowed"):
+        read_bytes(tmp_path, raw_file(bad.encode(), body))
 
 
 HEADER_KEYS = [
@@ -352,14 +440,21 @@ def test_missing_header_field(
         read_bytes(tmp_path, join(h, body))
 
 
-@pytest.mark.parametrize("key", [k for k in HEADER_KEYS if k != "version"])
-@pytest.mark.parametrize("value", [None, "x", 1.5, [], {}, True])
+LEGAL = [("sim_version", "x"), ("events", []), ("swap", True)]
+WRONG_TYPED = [
+    (k, v)
+    for k in HEADER_KEYS
+    if k != "version"
+    for v in (None, "x", 1.5, [], {}, True)
+    if (k, v) not in LEGAL
+]
+
+
+@pytest.mark.parametrize(("key", "value"), WRONG_TYPED)
 def test_wrongly_typed_header_field(
     good: tuple[bytes, World, Scenario], tmp_path: Path, key: str, value: Any
 ) -> None:
     h, body = split(good[0])
-    if (key, value) in [("sim_version", "x"), ("events", []), ("swap", True)]:
-        pytest.skip("a legal value for that field")
     h[key] = value
     with pytest.raises(ReplayError):
         read_bytes(tmp_path, join(h, body))
@@ -372,6 +467,22 @@ def test_scenario_hash_must_match_the_scenario(
     h["scenario"]["duration"] += 1.0
     with pytest.raises(ReplayError, match="hash"):
         read_bytes(tmp_path, join(h, body))
+
+
+def test_scenario_block_must_be_exactly_what_the_scenario_dumps_to(
+    good: tuple[bytes, World, Scenario], tmp_path: Path
+) -> None:
+    def case(mutate: Any) -> None:
+        h, body = split(good[0])
+        mutate(h["scenario"])
+        coerced = Scenario.model_validate(h["scenario"])  # lax parsing accepts it...
+        h["scenario_hash"] = content_hash(coerced)  # ...and the hash then matches
+        with pytest.raises(ReplayError, match="scenario is not"):
+            read_bytes(tmp_path, join(h, body))
+
+    case(lambda sc: sc["map"].update(mid_clusters=True))  # True for 1
+    case(lambda sc: sc.update(duration="3600.0"))
+    case(lambda sc: sc.pop("c"))  # a default filled in
 
 
 def test_bad_nested_fields(good: tuple[bytes, World, Scenario], tmp_path: Path) -> None:
@@ -399,6 +510,24 @@ def test_bad_nested_fields(good: tuple[bytes, World, Scenario], tmp_path: Path) 
             {"t_us": 1.5, "type": "x", "unit": 0, "other": None, "data": {}}
         )
     )
+    hz = 3_600_000_000
+    ev = {"type": "x", "unit": 0, "other": None, "data": {}}
+    case(lambda h: h.update(seed=-1))
+    case(lambda h: h.update(seed=2**63))
+    case(lambda h: h.update(seed=2**64))
+    case(lambda h: h.update(seed=10**4000))
+    case(lambda h: h.update(horizon_us=2**70))
+    case(lambda h: h.update(horizon_us=5))
+    case(lambda h: h["events"].append({**ev, "t_us": 2**80}))
+    case(lambda h: h["events"].append({**ev, "t_us": hz + 1}))
+    case(lambda h: h["events"].append({**ev, "t_us": -5}))
+    case(lambda h: h["events"].reverse())
+    case(lambda h: h["units"][1].update(end=hz + 1))
+    case(lambda h: h["units"][1].update(birth=hz + 1))
+    case(lambda h: h["events"].append({"t_us": hz, "type": "x", "unit": 0, "data": {}}))
+    case(lambda h: h["units"][0].pop("end"))
+    case(lambda h: h["rocks"]["cluster"].__setitem__(0, 2**63))
+    case(lambda h: h["rocks"]["cluster"].__setitem__(0, -1))
 
 
 def test_sections_must_match_the_bytes(good: tuple[bytes, World, Scenario], tmp_path: Path) -> None:
@@ -490,3 +619,51 @@ def test_a_24_hour_two_outpost_replay_is_under_5_mb(tmp_path: Path) -> None:
     assert size < 5_000_000
     r = read(p)
     assert r.state(1, 43_200_000_000)[0].shape == (3,)
+
+
+# ---- write checks that the arguments describe the world ----
+
+
+def test_write_rejects_arguments_that_do_not_describe_the_world(tmp_path: Path) -> None:
+    s = small_scenario()
+    w = build_world(s, 1)
+    w.run_until(w.horizon_us)
+    target = tmp_path / "a.swr"
+    with pytest.raises(ValueError, match="seed"):
+        write(target, w, s, 2)
+    with pytest.raises(ValueError, match="swap"):
+        write(target, w, s, 1, swap=True)
+    with pytest.raises(ValueError, match="horizon"):
+        write(target, w, small_scenario(duration=7200.0), 1)
+    for bad in (-1, 2**63, 2**64):
+        with pytest.raises(ValueError, match="seed"):
+            write(target, w, s, bad)
+    assert list(tmp_path.iterdir()) == []
+    write(target, w, s, 1)  # the right arguments still work
+
+
+def test_write_names_what_differs_in_the_starting_units(tmp_path: Path) -> None:
+    s = small_scenario()
+    w = build_world(s, 1)
+    w.command_acc(1, 0, (1.0, 0.0, 0.0))  # a command at birth only changes acceleration
+    w.run_until(w.horizon_us)
+    write(tmp_path / "ok.swr", w, s, 1)
+    team = s.blue.model_dump()
+    team["groups"][0]["initial_speed"] = 50.0  # same map and rocks, different start velocity
+    other = build_world(s.model_copy(update={"blue": type(s.blue).model_validate(team)}), 1)
+    with pytest.raises(ValueError, match="unit 1 starts"):
+        write(tmp_path / "bad.swr", other, s, 1)
+
+
+def test_write_allows_units_launched_after_the_start(tmp_path: Path) -> None:
+    s = small_scenario()
+    w = build_world(s, 1)
+    n = len(w.units)
+    w.run_until(1_000_000)
+    w.spawn(
+        2_000_000, (1e5, 0, 0), (0, 0, 0), team="blue", cls="scout", dry_mass=10.0,
+        fuel_mass=0.0, max_acc=0.0, ve=1000.0, radius=1.0,
+    )  # fmt: skip
+    w.run_until(w.horizon_us)
+    write(tmp_path / "a.swr", w, s, 1)
+    assert len(read(tmp_path / "a.swr").header["units"]) == n + 1

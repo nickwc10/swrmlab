@@ -6,6 +6,12 @@ Layout, all little-endian:
 * bytes 4-7: uint32 header length ``H``
 * bytes 8 to 8+H: the header, canonical UTF-8 JSON (sorted keys, compact separators, no NaN)
 * then each section listed in ``header["sections"]``, in order, back to back
+* a 32-byte trailer: the SHA-256 of every byte before it
+
+The trailer detects damage (truncation, flipped bytes, hand edits). It is not a signature:
+anyone can edit a file and recompute it, so it proves nothing about who wrote the file. The
+header must also be exactly the canonical encoding of what it parses to, which rules out
+duplicate keys and alternate spellings of the same values.
 
 Each section entry is ``{name, dtype, count}`` (and optionally ``required: true``). ``dtype``
 is a list of ``[field, type]`` or ``[field, type, shape]`` entries, so a reader can size any
@@ -19,7 +25,9 @@ the same bytes: nothing in the file depends on time, paths or library versions (
 ``sim_version``).
 """
 
+import hashlib
 import json
+import math
 import operator
 import os
 import struct
@@ -35,6 +43,7 @@ from swarmsim import SIM_VERSION
 from swarmsim.core.engine import Event, World
 from swarmsim.core.geometry import Rocks
 from swarmsim.core.segments import Vec3, _time, evaluate_segment
+from swarmsim.scenario.build import build_world
 from swarmsim.scenario.schema import Scenario, content_hash
 
 MAGIC = b"SWR2"
@@ -52,6 +61,10 @@ _TYPES = frozenset(["<i1", "<u1", "<i2", "<u2", "<i4", "<u4", "<i8", "<u8", "<f4
 _MAX_FIELDS = 64
 _MAX_SHAPE_ELEMENTS = 1 << 16
 _T_LIMIT = 2**61  # same bound the segment store puts on times
+_DIGEST = 32
+# Seeds at or above 2**63 collide in the RNG streams, so they are not accepted.
+_SEED_LIMIT = 2**63
+_CLUSTER_LIMIT = 2**31
 
 
 class ReplayError(ValueError):
@@ -75,6 +88,41 @@ def _canonical(header: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _check_seed(seed: int) -> int:
+    s = operator.index(seed)
+    if not 0 <= s < _SEED_LIMIT:
+        raise ValueError(f"seed {s} must satisfy 0 <= seed < 2**63")
+    return s
+
+
+def _check_identity(world: World, scenario: Scenario, seed: int, swap: bool) -> None:
+    """Raise ValueError unless ``world`` is what ``build_world(scenario, seed, swap)`` makes
+    (plus any units added later), so the header cannot name a different run."""
+    fresh = build_world(scenario, seed, swap)
+    if world.horizon_us != fresh.horizon_us:
+        raise ValueError(f"horizon_us is {world.horizon_us}, scenario gives {fresh.horizon_us}")
+    if world.c != fresh.c:
+        raise ValueError(f"c is {world.c}, scenario gives {fresh.c}")
+    for name in ("centers", "radii", "cluster"):
+        if not np.array_equal(getattr(world.rocks, name), getattr(fresh.rocks, name)):
+            raise ValueError(f"rock {name} differ from what seed {seed}, swap={swap} build")
+    if len(world.units) < len(fresh.units):
+        raise ValueError(
+            f"world has {len(world.units)} units, fewer than the {len(fresh.units)} built"
+        )
+    for want, have in zip(fresh.units, world.units, strict=False):
+        unit = want[0]
+        if have[:4] != want[:4]:
+            raise ValueError(
+                f"unit {unit} differs in team, class or birth from what seed/swap build"
+            )
+        a, b = fresh.store.state(unit, want[3]), world.store.state(unit, want[3])
+        if not (np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])):
+            raise ValueError(
+                f"unit {unit} starts at another position or velocity than seed/swap build"
+            )
+
+
 def write(
     path: str | Path, world: World, scenario: Scenario, seed: int, swap: bool = False
 ) -> None:
@@ -83,6 +131,8 @@ def write(
     ``scenario``, ``seed`` and ``swap`` must be what built the world; they are stored so the
     starting world can be rebuilt with ``build_world``.
     """
+    seed = _check_seed(seed)
+    _check_identity(world, scenario, seed, swap)
     table = world.store.table()
     seg_dtype = _dtype_from_spec(_SEGMENT_SPEC)
     if table.dtype != seg_dtype:
@@ -93,7 +143,7 @@ def write(
         "sim_version": SIM_VERSION,
         "scenario": scenario.model_dump(mode="json"),
         "scenario_hash": content_hash(scenario),
-        "seed": operator.index(seed),
+        "seed": seed,
         "swap": bool(swap),
         "horizon_us": world.horizon_us,
         "units": [
@@ -112,7 +162,8 @@ def write(
         "sections": [{"name": _SEGMENTS, "dtype": _SEGMENT_SPEC, "count": len(table)}],
     }
     raw = _canonical(header)
-    blob = _PREFIX.pack(MAGIC, len(raw)) + raw + table.tobytes()
+    payload = _PREFIX.pack(MAGIC, len(raw)) + raw + table.tobytes()
+    blob = payload + hashlib.sha256(payload).digest()
 
     target = Path(path)
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
@@ -172,6 +223,13 @@ def _reject_constant(name: str) -> NoReturn:
     raise ValueError(f"{name} is not allowed in JSON")
 
 
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"number {text[:20]} is not finite")
+    return value
+
+
 def _section_dtype(spec: Any, where: str) -> np.dtype[Any]:
     fields = _list(spec, f"{where}.dtype")
     if not 1 <= len(fields) <= _MAX_FIELDS:
@@ -199,37 +257,37 @@ def _section_dtype(spec: Any, where: str) -> np.dtype[Any]:
     return np.dtype(parsed)
 
 
-def _parse_units(raw: Any) -> list[dict[str, Any]]:
+def _parse_units(raw: Any, horizon: int) -> list[dict[str, Any]]:
     units = _list(raw, "units")
     for i, u in enumerate(units):
         u = _dict(u, "unit")
-        if _int(u.get("id"), "unit id") != i:
+        if _int(_field(u, "id"), "unit id") != i:
             _fail("unit ids must be 0, 1, 2 ... in order")
-        _str(u.get("team"), "unit team")
-        _str(u.get("cls"), "unit cls")
-        birth = _int(u.get("birth"), "unit birth")
-        if not -_T_LIMIT <= birth <= _T_LIMIT:
-            _fail("unit birth is out of range")
-        if u.get("end") is not None:
-            end = _int(u["end"], "unit end")
-            if not birth <= end <= _T_LIMIT:
-                _fail("unit end must lie between its birth and the time limit")
+        _str(_field(u, "team"), "unit team")
+        _str(_field(u, "cls"), "unit cls")
+        birth = _int(_field(u, "birth"), "unit birth")
+        if not 0 <= birth <= horizon:
+            _fail("unit birth must lie within the run")
+        end = _field(u, "end")
+        if end is not None and not birth <= _int(end, "unit end") <= horizon:
+            _fail("unit end must lie between its birth and the horizon")
     return units
 
 
-def _parse_events(raw: Any, n_units: int) -> tuple[Event, ...]:
-    out = []
+def _parse_events(raw: Any, n_units: int, horizon: int) -> tuple[Event, ...]:
+    out: list[Event] = []
     for e in _list(raw, "events"):
         e = _dict(e, "event")
-        t, unit = _int(e.get("t_us"), "event t_us"), _int(e.get("unit"), "event unit")
-        other = e.get("other")
+        t, unit = _int(_field(e, "t_us"), "event t_us"), _int(_field(e, "unit"), "event unit")
+        if not 0 <= t <= horizon or (out and t < out[-1].t_us):
+            _fail("event times must lie within the run and not decrease")
+        other = _field(e, "other")
         if other is not None:
             other = _int(other, "event other")
         if not 0 <= unit < n_units or (other is not None and not 0 <= other < n_units):
             _fail("event names an unknown unit")
-        out.append(
-            Event(t, _str(e.get("type"), "event type"), unit, other, _dict(e.get("data"), "data"))
-        )
+        etype, data = _str(_field(e, "type"), "event type"), _dict(_field(e, "data"), "data")
+        out.append(Event(t, etype, unit, other, data))
     return tuple(out)
 
 
@@ -241,21 +299,23 @@ def _parse_rocks(raw: Any) -> Rocks:
     ]
     radii = [_number(x, "rock radius") for x in _list(_field(d, "radii"), "rocks.radii")]
     cluster = [_int(x, "rock cluster") for x in _list(_field(d, "cluster"), "rocks.cluster")]
+    if any(not 0 <= x < _CLUSTER_LIMIT for x in cluster):
+        _fail("rock cluster ids are out of range")
     if any(len(c) != 3 for c in centers):
         _fail("rock centers need three components")
     return Rocks(np.array(centers).reshape(-1, 3), np.array(radii), np.array(cluster))
 
 
 def _check_segments(
-    rows: NDArray[np.void], units: list[dict[str, Any]]
+    rows: NDArray[np.void], units: list[dict[str, Any]], horizon: int
 ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
     """Validate segment rows; return the per-unit start offsets and the t0 column."""
     n = len(units)
     unit, t0 = rows["unit"].astype(np.int64), rows["t0"].astype(np.int64)
     if len(rows) and (unit.min() < 0 or unit.max() >= n):
         _fail("a segment names an unknown unit")
-    if np.abs(t0).max(initial=0) > _T_LIMIT:
-        _fail("a segment time is out of range")
+    if len(rows) and (t0.min() < 0 or t0.max() > horizon):
+        _fail("a segment starts outside the run")
     for name in ("pos", "vel", "acc"):
         if not np.all(np.isfinite(rows[name])):
             _fail(f"segment {name} must be finite")
@@ -316,31 +376,43 @@ class Replay:
         return evaluate_segment(int(row["t0"]), row["pos"], row["vel"], row["acc"], t)
 
 
-def _parse(data: bytes) -> Replay:
-    if len(data) < _PREFIX.size:
-        _fail("file is shorter than the fixed prefix")
-    magic, header_len = _PREFIX.unpack_from(data)
-    if magic != MAGIC:
-        _fail(f"wrong magic {magic!r}, expected {MAGIC!r}")
+def _parse(file: bytes) -> Replay:
+    if len(file) < _PREFIX.size + _DIGEST:
+        _fail("file is shorter than the fixed prefix and checksum")
+    if file[: len(MAGIC)] != MAGIC:
+        _fail(f"wrong magic {file[: len(MAGIC)]!r}, expected {MAGIC!r}")
+    data, digest = file[:-_DIGEST], file[-_DIGEST:]
+    if hashlib.sha256(data).digest() != digest:
+        _fail("checksum mismatch: the file is damaged or was edited")
+    _, header_len = _PREFIX.unpack_from(data)
     body = _PREFIX.size + header_len
     if body > len(data):
         _fail("header length runs past the end of the file")
-    header = json.loads(data[_PREFIX.size : body].decode("utf-8"), parse_constant=_reject_constant)
+    raw = data[_PREFIX.size : body]
+    header = json.loads(
+        raw.decode("utf-8"), parse_constant=_reject_constant, parse_float=_finite_float
+    )
     header = _dict(header, "header")
+    if _canonical(header) != raw:
+        _fail("header is not in canonical form (duplicate keys, spacing or number spelling)")
     if _int(header.get("version"), "version") != VERSION:
         _fail(f"unsupported version {header.get('version')}, expected {VERSION}")
     _str(_field(header, "sim_version"), "sim_version")
-    _int(_field(header, "seed"), "seed")
+    if not 0 <= _int(_field(header, "seed"), "seed") < _SEED_LIMIT:
+        _fail("seed is out of range")
     if not isinstance(_field(header, "swap"), bool):
         _fail("swap must be a boolean")
-    if _int(_field(header, "horizon_us"), "horizon_us") < 0:
-        _fail("horizon_us must be >= 0")
+    horizon = _int(_field(header, "horizon_us"), "horizon_us")
     scenario = Scenario.model_validate(_dict(_field(header, "scenario"), "scenario"))
+    if _canonical(header["scenario"]) != _canonical(scenario.model_dump(mode="json")):
+        _fail("scenario is not in its canonical form")
     if _str(_field(header, "scenario_hash"), "scenario_hash") != content_hash(scenario):
         _fail("scenario_hash does not match the stored scenario")
-    units = _parse_units(_field(header, "units"))
+    if horizon != round(scenario.duration * 1e6):
+        _fail("horizon_us does not match the scenario duration")
+    units = _parse_units(_field(header, "units"), horizon)
     rocks = _parse_rocks(_field(header, "rocks"))
-    events = _parse_events(_field(header, "events"), len(units))
+    events = _parse_events(_field(header, "events"), len(units), horizon)
 
     offset = body
     rows: NDArray[np.void] | None = None
@@ -368,7 +440,7 @@ def _parse(data: bytes) -> Replay:
         _fail("trailing bytes after the last section")
     if rows is None:
         _fail("segments section is missing")
-    starts, t0 = _check_segments(rows, units)
+    starts, t0 = _check_segments(rows, units, horizon)
     return Replay(header, scenario, rocks, events, rows, starts, t0)
 
 
