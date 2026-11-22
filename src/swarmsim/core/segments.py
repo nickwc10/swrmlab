@@ -3,8 +3,8 @@
 Each unit's path is a list of segments. A segment starts at integer microsecond ``t0``
 with position ``pos``, velocity ``vel`` and constant acceleration ``acc``. State at a
 later time ``t`` is ``pos + vel*dt + acc*dt^2/2`` with ``dt = (t - t0) / 1e6``. The
-difference is taken in int64 microseconds first and converted to seconds second, in this
-one place, so every consumer gets identical results.
+difference is taken in exact integer microseconds first (Python ints here, equal to int64
+because times are bounded) and converted to seconds second, in this one place.
 """
 
 import operator
@@ -26,8 +26,9 @@ _SEGMENT_DTYPE = np.dtype(
     ]
 )
 _INITIAL_CAPACITY = 64
-# Times are limited to +-2**62 us so no int64 difference between two times can wrap.
-_T_LIMIT = 2**62
+# Times are limited to +-2**61 us so the difference of any two times fits in int64
+# (Numba kernels subtract them).
+_T_LIMIT = 2**61
 
 
 def _time(name: str, value: int) -> int:

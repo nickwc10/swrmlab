@@ -148,7 +148,7 @@ def test_table_order_dtype_and_growth() -> None:
     assert pos[0] == 50.0
 
 
-LIMIT = 2**62
+LIMIT = 2**61
 ZERO = (0.0, 0.0, 0.0)
 
 
@@ -191,3 +191,11 @@ def test_boundary_times_are_accepted() -> None:
     assert np.all(pos == 0.0)
     store.state(u, LIMIT)
     assert store.add_unit(LIMIT, ZERO, ZERO, ZERO) == 1
+
+
+def test_state_across_full_time_span_is_exact_for_resting_unit() -> None:
+    store = SegmentStore()
+    u = store.add_unit(-LIMIT, (1, 2, 3), ZERO, ZERO)
+    pos, vel = store.state(u, LIMIT)
+    assert np.array_equal(pos, (1.0, 2.0, 3.0))
+    assert np.all(vel == 0.0)
