@@ -111,8 +111,9 @@ def arrival_time(
     ``distance(x(t), send_pos) <= c * (t - t_send_us) / 1e6``, or None if the message has
     not arrived by then. A message is a wavefront that passes each point once: a receiver
     born after the wavefront has passed its birth position never gets that message (None);
-    exactly at birth it receives it at birth. Valid only for the receiver's trajectory as currently planned
-    (the last segment is extrapolated); callers recompute after the next ``set_acc``.
+    exactly at birth it receives it at birth. Valid only for the receiver's trajectory as
+    currently planned (the last segment is extrapolated); callers recompute after the next
+    ``set_acc``.
     The receiver's speed must stay below ``c`` (not checked).
     """
     c = _check_c(c)
