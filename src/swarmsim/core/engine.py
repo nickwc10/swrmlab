@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 
 from swarmsim.core.geometry import Rocks, first_within
 from swarmsim.core.light import C, _check_c
-from swarmsim.core.propulsion import burn_time, fuel_after
+from swarmsim.core.propulsion import MAX_SPEED_FRACTION, burn_time, fuel_after, too_fast, top_speed
 from swarmsim.core.segments import SegmentStore, _time, _vec3
 
 # Priorities within one microsecond.
@@ -29,7 +29,6 @@ _COLLISION, _FUEL_OUT, _COMMAND = 0, 1, 2
 _ACC_SLACK = 1e-12
 # Largest acceleration a unit may be given [m/s2]; beyond this the float math loses meaning.
 MAX_ACC = 1e9
-_MAX_SPEED_FRACTION = 0.1
 
 _Triple = tuple[float, float, float]
 _ZERO: _Triple = (0.0, 0.0, 0.0)
@@ -173,9 +172,9 @@ class World:
         if limit > MAX_ACC:
             raise ValueError(f"max_acc {limit} exceeds the limit {MAX_ACC} m/s2")
         # Every unit must stay slower than light for the light-delay search to hold.
-        top_speed = math.hypot(*_triple(v)) + ve * math.log((dry + fuel) / dry)
-        if top_speed > _MAX_SPEED_FRACTION * self.c:
-            raise ValueError(f"top speed {top_speed} m/s exceeds {_MAX_SPEED_FRACTION} c")
+        top = top_speed(math.hypot(*_triple(v)), dry, fuel, ve)
+        if too_fast(top, self.c):
+            raise ValueError(f"top speed {top} m/s exceeds {MAX_SPEED_FRACTION} c")
         contact = self._first_contact(t, _triple(p), _triple(v), _ZERO, radius)
         if contact is not None and contact[0] == 0.0:
             raise ValueError(f"unit would start touching rock {contact[1]}")

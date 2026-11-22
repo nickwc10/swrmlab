@@ -5,10 +5,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 import yaml
 from pydantic import BaseModel, ValidationError
 
+from swarmsim.core.engine import World
+from swarmsim.core.geometry import Rocks
+from swarmsim.core.segments import SegmentStore
 from swarmsim.scenario import schema
 from swarmsim.scenario.schema import MapSpec, Scenario, ShipClass, content_hash, load
 
@@ -234,3 +238,66 @@ def test_hash_is_of_canonical_json() -> None:
     s = Scenario.model_validate(raw())
     text = json.dumps(s.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
     assert content_hash(s) == hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_unflyable_class_names_group_class_and_fields() -> None:
+    d = raw()
+    d["c"] = 1e3  # 0.1 c = 100 m/s, far below this class's delta-v
+    with pytest.raises(ValidationError) as err:
+        Scenario.model_validate(d)
+    text = str(err.value)
+    for word in ("blue.groups[0]", "scout", "top speed", "ve", "fuel_mass", "dry_mass"):
+        assert word in text
+    d = raw()
+    d["ship_classes"]["scout"].update(ve=3e7, fuel_mass=1e5)
+    with pytest.raises(ValidationError, match="top speed"):
+        Scenario.model_validate(d)
+
+
+def test_dry_mass_has_a_realistic_floor() -> None:
+    d = raw()
+    d["ship_classes"]["scout"]["dry_mass"] = 5e-324
+    with pytest.raises(ValidationError, match="dry_mass"):
+        Scenario.model_validate(d)
+
+
+def test_load_and_world_agree_on_the_speed_limit_exactly() -> None:
+    c, ve, dry, fuel = 1e6, 30_000.0, 100.0, 2000.0
+    edge = 0.1 * c - ve * math.log((dry + fuel) / dry)
+    assert 0.0 < edge < 0.01 * c
+    # steps of a few ulps of the sum (about 1.5e-11) on both sides of the edge
+    speeds = [edge + k * 1e-11 for k in range(-6, 7)]
+    verdicts = set()
+    for speed in speeds:
+        d = raw()
+        d["c"] = c
+        d["ship_classes"]["scout"] = {**SHIP, "dry_mass": dry, "fuel_mass": fuel, "ve": ve}
+        d["blue"]["groups"][0]["initial_speed"] = float(speed)
+        try:
+            Scenario.model_validate(d)
+            loads = True
+        except ValidationError:
+            loads = False
+        world = World(
+            SegmentStore(), Rocks(np.zeros((0, 3)), np.zeros(0), np.zeros(0)), c, horizon_us=1
+        )
+        try:
+            world.spawn(
+                0, (0.0, 0.0, 0.0), (float(speed), 0.0, 0.0), team="b", cls="scout",
+                dry_mass=dry, fuel_mass=fuel, max_acc=1.0, ve=ve, radius=5.0,
+            )  # fmt: skip
+            spawns = True
+        except ValueError:
+            spawns = False
+        assert loads == spawns, speed
+        verdicts.add(loads)
+    assert verdicts == {True, False}  # the speeds straddle the limit
+
+
+def test_negative_zero_hashes_like_zero() -> None:
+    d = raw()
+    d["blue"]["groups"][0]["initial_speed"] = -0.0
+    a, b = Scenario.model_validate(d), Scenario.model_validate(raw())
+    assert a == b
+    assert content_hash(a) == content_hash(b)
+    assert math.copysign(1.0, a.blue.groups[0].initial_speed) == 1.0

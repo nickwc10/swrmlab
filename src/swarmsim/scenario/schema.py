@@ -12,12 +12,24 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from swarmsim.core.propulsion import MAX_SPEED_FRACTION, too_fast, top_speed
 
 # Ships may start at no more than this fraction of c, so light delay stays well defined.
 _MAX_START_SPEED_FRACTION = 0.01
 _DAY_S = 86_400.0
 _MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+
+class _Model(BaseModel):
+    model_config = _MODEL_CONFIG
+
+    @field_validator("*")
+    @classmethod
+    def _no_negative_zero(cls, value: Any) -> Any:
+        # -0.0 equals 0.0 but would hash differently; adding 0.0 turns it into +0.0.
+        return value + 0.0 if isinstance(value, float) else value
 
 
 def _num(default: float, lo: float, hi: float, description: str, *, open_lo: bool = False) -> Any:
@@ -31,22 +43,18 @@ def _count(default: int, lo: int, hi: int, description: str) -> Any:
     return Field(default, ge=lo, le=hi, description=description)
 
 
-class ShipClass(BaseModel):
+class ShipClass(_Model):
     """Physical limits of one kind of ship (also used for outposts)."""
 
-    model_config = _MODEL_CONFIG
-
-    dry_mass: float = _num(1000.0, 0.0, 1e12, "Mass without fuel [kg]", open_lo=True)
+    dry_mass: float = _num(1000.0, 1.0, 1e12, "Mass without fuel, at least 1 kg [kg]")
     fuel_mass: float = _num(1000.0, 0.0, 1e12, "Fuel mass at the start [kg]")
     max_acc: float = _num(1.0, 0.0, 1e4, "Largest acceleration the engine can give [m/s2]")
     ve: float = _num(30_000.0, 0.0, 3e7, "Exhaust speed of the engine [m/s]", open_lo=True)
     radius: float = _num(10.0, 0.0, 1e5, "Radius of the ship as a sphere, used for contact [m]")
 
 
-class ShipGroup(BaseModel):
+class ShipGroup(_Model):
     """``count`` identical ships of one class that start together."""
-
-    model_config = _MODEL_CONFIG
 
     ship_class: str = Field(description="Name of an entry in the scenario's ship_classes [name]")
     count: int = _count(1, 1, 1000, "Number of ships in this group [ships]")
@@ -58,10 +66,8 @@ class ShipGroup(BaseModel):
     )
 
 
-class TeamSpec(BaseModel):
+class TeamSpec(_Model):
     """One team: its outpost and the ships it starts with."""
-
-    model_config = _MODEL_CONFIG
 
     outpost: ShipClass = Field(
         default=ShipClass(dry_mass=1e6, fuel_mass=0.0, max_acc=0.0, ve=30_000.0, radius=100.0),
@@ -79,10 +85,8 @@ class TeamSpec(BaseModel):
         return self
 
 
-class MapSpec(BaseModel):
+class MapSpec(_Model):
     """Asteroid field. Rocks are made in the west half and mirrored to the east."""
-
-    model_config = _MODEL_CONFIG
 
     separation: float = _num(3e8, 1e3, 1e12, "Distance between the two home clusters [m]")
     cluster_radius: float = _num(2e6, 1.0, 1e10, "Radius of every rock cluster [m]")
@@ -120,10 +124,8 @@ class MapSpec(BaseModel):
         return self
 
 
-class Scenario(BaseModel):
+class Scenario(_Model):
     """A complete battle setup."""
-
-    model_config = _MODEL_CONFIG
 
     name: str = Field(description="Short label for the scenario [name]")
     c: float = _num(299_792_458.0, 1e3, 1e12, "Speed of light [m/s]")
@@ -149,6 +151,14 @@ class Scenario(BaseModel):
                     raise ValueError(
                         f"{where}.initial_speed {group.initial_speed} m/s exceeds "
                         f"0.01 c = {limit} m/s"
+                    )
+                cls = self.ship_classes[group.ship_class]
+                top = top_speed(group.initial_speed, cls.dry_mass, cls.fuel_mass, cls.ve)
+                if too_fast(top, self.c):
+                    raise ValueError(
+                        f"{where}: ship class '{group.ship_class}' has top speed {top} m/s, "
+                        f"above {MAX_SPEED_FRACTION} c = {MAX_SPEED_FRACTION * self.c} m/s; "
+                        "reduce ve or fuel_mass, raise dry_mass, or lower initial_speed"
                     )
         return self
 

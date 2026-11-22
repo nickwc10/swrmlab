@@ -5,6 +5,7 @@ import pytest
 
 from swarmsim.core.engine import World
 from swarmsim.scenario.build import build_world
+from swarmsim.scenario.maps import build_map
 from swarmsim.scenario.schema import Scenario, content_hash, load
 
 EXAMPLE = Path(__file__).parents[1] / "scenarios" / "two_outposts.yaml"
@@ -83,16 +84,31 @@ def test_the_world_uses_the_scenario_light_speed_and_map() -> None:
 
 def test_outposts_sit_just_outside_their_hiding_rock_and_touch_nothing() -> None:
     s = scenario()
+    tol = s.map.outpost_clearance * (1 + 1e-9)
+    for swap in (False, True):
+        for seed in range(10):
+            w = build_world(s, seed, swap)
+            m = build_map(s.map, seed, swap)
+            for first, hide in ((0, m.blue_hide), (5, m.red_hide)):
+                p, v = state(w, first)
+                assert not v.any()
+                d = np.linalg.norm(w.rocks.centers - p, axis=1) - w.rocks.radii - 50.0
+                assert int(np.argmin(d)) == hide, (seed, swap, first)
+                assert 0.0 < d[hide] <= tol
+                assert (d > 0).all()
+                assert np.sum(d <= tol) == 1  # every other rock is farther than the clearance
+
+
+def test_west_and_east_placements_differ_and_are_not_mirrors() -> None:
+    s = scenario()
     for seed in range(10):
         w = build_world(s, seed)
-        for first, hide_side in ((0, "blue"), (5, "red")):
-            p, v = state(w, first)
-            assert not v.any()
-            d = np.linalg.norm(w.rocks.centers - p, axis=1) - w.rocks.radii - 50.0
-            nearest = int(np.argmin(d))
-            assert 0.0 < d[nearest] <= s.map.outpost_clearance * (1 + 1e-9)
-            assert (d > 0).all(), hide_side
-            assert np.sum(d <= s.map.outpost_clearance * (1 + 1e-9)) >= 1
+        m = build_map(s.map, seed)
+        for k in range(5):  # the outpost, then each ship
+            blue = state(w, k)[0] - w.rocks.centers[m.blue_hide]
+            red = state(w, 5 + k)[0] - w.rocks.centers[m.red_hide]
+            assert not np.allclose(blue, red, rtol=0, atol=1e-6), (seed, k)
+            assert not np.allclose(blue * np.array([-1.0, 1.0, 1.0]), red, rtol=0, atol=1e-6)
 
 
 def test_outposts_are_inert() -> None:
@@ -160,10 +176,9 @@ def test_a_built_world_runs() -> None:
     assert w.now_us == w.horizon_us
 
 
-def test_bad_spawn_values_surface_as_value_error() -> None:
-    s = scenario(c=1e5)  # top speed 0.1 c = 1e4 m/s is below the classes' delta-v
-    with pytest.raises(ValueError, match="top speed"):
-        build_world(s, 0)
+def test_unflyable_ship_classes_fail_at_load_naming_group_and_class() -> None:
+    with pytest.raises(ValueError, match=r"blue\.groups\[0\].*scout.*top speed"):
+        scenario(c=1e5)  # top speed 0.1 c = 1e4 m/s is below the classes' delta-v
 
 
 def test_unplaceable_outposts_raise_naming_the_setting() -> None:
