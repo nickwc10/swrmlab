@@ -47,6 +47,18 @@ def _vec3(name: str, value: Sequence[float] | NDArray[np.float64]) -> Vec3:
     return arr
 
 
+def evaluate_segment(t0: int, pos: Vec3, vel: Vec3, acc: Vec3, t_us: int) -> tuple[Vec3, Vec3]:
+    """Position and velocity at ``t_us`` on a segment starting at ``t0``.
+
+    The one place segment motion is evaluated; stores and replays both call it, so they
+    agree exactly. The time difference is taken in integer microseconds first.
+    """
+    dt = (t_us - t0) / 1e6
+    p = pos + vel * dt + acc * (0.5 * dt * dt)
+    v = vel + acc * dt
+    return np.array(p, dtype=np.float64), np.array(v, dtype=np.float64)
+
+
 class SegmentStore:
     def __init__(self) -> None:
         self._rows: NDArray[np.void] = np.zeros(_INITIAL_CAPACITY, dtype=_SEGMENT_DTYPE)
@@ -80,10 +92,7 @@ class SegmentStore:
 
     def _eval(self, row_index: int, t_us: int) -> tuple[Vec3, Vec3]:
         row = self._rows[row_index]
-        dt = (t_us - int(row["t0"])) / 1e6
-        pos = row["pos"] + row["vel"] * dt + row["acc"] * (0.5 * dt * dt)
-        vel = row["vel"] + row["acc"] * dt
-        return np.array(pos, dtype=np.float64), np.array(vel, dtype=np.float64)
+        return evaluate_segment(int(row["t0"]), row["pos"], row["vel"], row["acc"], t_us)
 
     def add_unit(
         self,
