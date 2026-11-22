@@ -109,7 +109,9 @@ def arrival_time(
 
     Returns the smallest t in [max(t_send_us, birth), min(horizon_us, end)] with
     ``distance(x(t), send_pos) <= c * (t - t_send_us) / 1e6``, or None if the message has
-    not arrived by then. Valid only for the receiver's trajectory as currently planned
+    not arrived by then. A message is a wavefront that passes each point once: a receiver
+    born after the wavefront has passed its birth position never gets that message (None);
+    exactly at birth it receives it at birth. Valid only for the receiver's trajectory as currently planned
     (the last segment is extrapolated); callers recompute after the next ``set_acc``.
     The receiver's speed must stay below ``c`` (not checked).
     """
@@ -126,7 +128,15 @@ def arrival_time(
     def g(t: int) -> float:
         return _distance(store, receiver, t, p) - c * ((t - t_send) / 1e6)
 
-    if g(lo) <= 0.0:
+    g_lo = g(lo)
+    if t_send < store.birth(receiver):
+        # The wavefront passes each point once. If it had already passed the birth
+        # position before the receiver existed, the receiver never gets this message.
+        if g_lo < 0.0:
+            return None
+        if g_lo == 0.0:
+            return lo
+    if g_lo <= 0.0:
         return lo
     if g(hi) > 0.0:
         return None

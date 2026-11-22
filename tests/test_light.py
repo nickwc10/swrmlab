@@ -22,7 +22,7 @@ def test_rest_unit_one_light_second_away() -> None:
     s, u = _rest_unit(born=-5_000_000)
     t = emission_time(s, u, 1_000_000, (0, 0, 0))
     assert t is not None
-    assert -1 <= t <= 0  # seen as of 1_000_000 us ago, within 1 us, never early
+    assert t == 0  # seen as of exactly 1_000_000 us ago
 
 
 def test_emission_tight_and_never_early() -> None:
@@ -53,7 +53,7 @@ def test_after_end_seen_until_end_light_arrives() -> None:
     t = emission_time(s, u, 500_000, (0, 0, 0))
     assert t is not None and t <= 100
     last = emission_time(s, u, 1_000_099, (0, 0, 0))
-    assert last is not None and 99 <= last < 100
+    assert last == 99
     assert emission_time(s, u, 1_000_100, (0, 0, 0)) is None
     assert emission_time(s, u, 5_000_000, (0, 0, 0)) is None
 
@@ -125,8 +125,8 @@ def test_arrival_receiver_at_send_position_is_instant() -> None:
 
 def test_arrival_respects_birth_end_and_horizon() -> None:
     s, u = _rest_unit(born=2_000_000)
-    # Sent before birth: light already past; receiver gets it at birth.
-    assert arrival_time(s, u, 0, (0, 0, 0), 10_000_000) == 2_000_000
+    # Sent before birth, wavefront passed the birth position at 1_000_000: never received.
+    assert arrival_time(s, u, 0, (0, 0, 0), 10_000_000) is None
     s2, u2 = _rest_unit(born=0)
     s2.end(u2, 500_000)
     assert arrival_time(s2, u2, 0, (0, 0, 0), 10_000_000) is None
@@ -163,3 +163,40 @@ def test_validation() -> None:
             emission_time(s, u, 0, bad_p)
         with pytest.raises(ValueError):
             arrival_time(s, u, 0, bad_p, 10)
+
+
+def test_arrival_wavefront_exactly_at_birth_is_received() -> None:
+    s, u = _rest_unit(born=1_000_000)
+    assert arrival_time(s, u, 0, (0, 0, 0), 10_000_000) == 1_000_000
+
+
+def test_arrival_moving_receiver_born_after_wavefront_passed() -> None:
+    c = 3e5
+    s = SegmentStore()
+    u = s.add_unit(10_000_000, (1000.0, 0, 0), (50.0, 0, 0), (0, 0, 0))
+    s.set_acc(u, 12_000_000, (0, 20.0, 0))
+    s.set_acc(u, 15_000_000, (-5.0, 0, 0))
+    assert arrival_time(s, u, 0, (0, 0, 0), 10**9, c=c) is None
+
+
+def test_arrival_born_after_send_wavefront_not_yet_arrived() -> None:
+    c = 3e5
+    s = SegmentStore()
+    u = s.add_unit(2_000_000, (1.5e6, 0, 0), (10.0, 0, 0), (0, 0, 0))
+    t = arrival_time(s, u, 0, (0, 0, 0), 10**9, c=c)
+    assert t is not None and t > 2_000_000
+    assert _dist(s, u, t, (0, 0, 0)) <= c * (t / 1e6)
+    assert _dist(s, u, t - 1, (0, 0, 0)) > c * ((t - 1) / 1e6)
+
+
+def test_out_of_range_times_raise() -> None:
+    s, u = _rest_unit()
+    big = 2**61 + 1
+    with pytest.raises(ValueError):
+        emission_time(s, u, big, (0, 0, 0))
+    with pytest.raises(ValueError):
+        arrival_time(s, u, big, (0, 0, 0), 10)
+    with pytest.raises(ValueError):
+        arrival_time(s, u, 0, (0, 0, 0), big)
+    with pytest.raises(ValueError):
+        arrival_time(s, u, -big, (0, 0, 0), 10)
