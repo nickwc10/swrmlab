@@ -1,0 +1,24 @@
+# Generated output: runs, replays, renders, and any optimized parameter sets
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local
+.DS_Store
+.env
+
+# Claude files and planning notes stay local
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json
+docs/superpowers/
