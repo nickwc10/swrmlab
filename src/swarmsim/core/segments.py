@@ -26,6 +26,15 @@ _SEGMENT_DTYPE = np.dtype(
     ]
 )
 _INITIAL_CAPACITY = 64
+# Times are limited to +-2**62 us so no int64 difference between two times can wrap.
+_T_LIMIT = 2**62
+
+
+def _time(name: str, value: int) -> int:
+    t = operator.index(value)
+    if not -_T_LIMIT <= t <= _T_LIMIT:
+        raise ValueError(f"{name} {t} is outside the supported range +-{_T_LIMIT} us")
+    return t
 
 
 def _vec3(name: str, value: Sequence[float] | NDArray[np.float64]) -> Vec3:
@@ -46,6 +55,9 @@ class SegmentStore:
         self._unit_t0: list[list[int]] = []
         self._end: list[int | None] = []
 
+    def __len__(self) -> int:
+        return len(self._unit_rows)
+
     def _check_unit(self, unit: int) -> int:
         u = operator.index(unit)
         if u < 0 or u >= len(self._unit_rows):
@@ -63,8 +75,6 @@ class SegmentStore:
         row["pos"] = pos
         row["vel"] = vel
         row["acc"] = acc
-        self._unit_rows[unit].append(self._count)
-        self._unit_t0[unit].append(t_us)
         self._count += 1
 
     def _eval(self, row_index: int, t_us: int) -> tuple[Vec3, Vec3]:
@@ -81,18 +91,18 @@ class SegmentStore:
         vel: Sequence[float] | NDArray[np.float64],
         acc: Sequence[float] | NDArray[np.float64],
     ) -> int:
-        t = operator.index(t_us)
+        t = _time("t_us", t_us)
         p, v, a = _vec3("pos", pos), _vec3("vel", vel), _vec3("acc", acc)
         unit = len(self._unit_rows)
-        self._unit_rows.append([])
-        self._unit_t0.append([])
-        self._end.append(None)
         self._append(unit, t, p, v, a)
+        self._unit_rows.append([self._count - 1])
+        self._unit_t0.append([t])
+        self._end.append(None)
         return unit
 
     def set_acc(self, unit: int, t_us: int, acc: Sequence[float] | NDArray[np.float64]) -> None:
         u = self._check_unit(unit)
-        t = operator.index(t_us)
+        t = _time("t_us", t_us)
         a = _vec3("acc", acc)
         if self._end[u] is not None:
             raise ValueError(f"unit {u} ended at {self._end[u]}; cannot set acceleration")
@@ -104,10 +114,12 @@ class SegmentStore:
             return
         pos, vel = self._eval(self._unit_rows[u][-1], t)
         self._append(u, t, pos, vel, a)
+        self._unit_rows[u].append(self._count - 1)
+        self._unit_t0[u].append(t)
 
     def end(self, unit: int, t_us: int) -> None:
         u = self._check_unit(unit)
-        t = operator.index(t_us)
+        t = _time("t_us", t_us)
         if self._end[u] is not None:
             raise ValueError(f"unit {u} already ended at {self._end[u]}")
         if t < self._unit_t0[u][-1]:
@@ -122,7 +134,7 @@ class SegmentStore:
 
     def state(self, unit: int, t_us: int) -> tuple[Vec3, Vec3]:
         u = self._check_unit(unit)
-        t = operator.index(t_us)
+        t = _time("t_us", t_us)
         t0s = self._unit_t0[u]
         if t < t0s[0]:
             raise ValueError(f"t_us {t} is before unit {u} was born at {t0s[0]}")

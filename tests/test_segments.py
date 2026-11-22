@@ -146,3 +146,48 @@ def test_table_order_dtype_and_growth() -> None:
     assert list(table["unit"]) == sorted(table["unit"])
     pos, _ = store.state(ids[50], 1050)
     assert pos[0] == 50.0
+
+
+LIMIT = 2**62
+ZERO = (0.0, 0.0, 0.0)
+
+
+def test_failed_add_unit_leaves_store_unchanged() -> None:
+    store = SegmentStore()
+    for bad_t in (2**63, LIMIT + 1, -LIMIT - 1):
+        with pytest.raises(ValueError, match="range"):
+            store.add_unit(bad_t, ZERO, ZERO, ZERO)
+    with pytest.raises(ValueError, match="finite"):
+        store.add_unit(0, (float("nan"), 0, 0), ZERO, ZERO)
+    assert len(store) == 0
+    assert len(store.table()) == 0
+    assert store.add_unit(0, ZERO, ZERO, ZERO) == 0
+    assert len(store) == 1
+    assert store.birth(0) == 0
+    assert len(store.table()) == 1
+
+
+@pytest.mark.parametrize("bad_t", [2**63, LIMIT + 1, -LIMIT - 1, -(2**63) - 1])
+def test_out_of_range_times_raise_value_error_without_mutation(bad_t: int) -> None:
+    store = SegmentStore()
+    u = store.add_unit(0, ZERO, ZERO, (1, 0, 0))
+    with pytest.raises(ValueError, match="range"):
+        store.set_acc(u, bad_t, (2, 0, 0))
+    with pytest.raises(ValueError, match="range"):
+        store.end(u, bad_t)
+    with pytest.raises(ValueError, match="range"):
+        store.state(u, bad_t)
+    assert len(store.table()) == 1
+    assert store.table()["acc"][0][0] == 1.0
+    assert store.end_time(u) is None
+
+
+def test_boundary_times_are_accepted() -> None:
+    store = SegmentStore()
+    u = store.add_unit(-LIMIT, ZERO, ZERO, ZERO)
+    store.set_acc(u, LIMIT, (1, 0, 0))
+    store.end(u, LIMIT)
+    pos, _ = store.state(u, -LIMIT)
+    assert np.all(pos == 0.0)
+    store.state(u, LIMIT)
+    assert store.add_unit(LIMIT, ZERO, ZERO, ZERO) == 1
