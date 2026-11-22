@@ -161,6 +161,48 @@ def test_plot_refuses_to_overwrite_its_own_replay(
     assert replay.read_bytes() == before
 
 
+@pytest.mark.parametrize("spelling", ["same", "dotdot", "symlink", "default"])
+def test_demo_refuses_to_overwrite_its_own_scenario(
+    spelling: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder = tmp_path / "scenarios"
+    folder.mkdir()
+    copy = folder / "two_outposts.yaml"
+    copy.write_bytes(SCENARIO.read_bytes())
+    monkeypatch.chdir(tmp_path)
+    link = tmp_path / "link.swr"
+    link.symlink_to(copy)
+    out = {
+        "same": str(copy),
+        "dotdot": str(folder / ".." / "scenarios" / "two_outposts.yaml"),
+        "symlink": str(link),
+        "default": "scenarios/two_outposts.yaml",
+    }[spelling]
+    args = ["demo", "--seed", "1", "--out", out]
+    if spelling != "default":
+        args += ["--scenario", str(copy)]
+    _fails(args, capsys, "scenario")
+    assert copy.read_bytes() == SCENARIO.read_bytes()
+    assert link.is_symlink()
+
+
+def test_demo_writes_a_new_file_beside_the_scenario(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    copy, out = tmp_path / "s.yaml", tmp_path / "s.swr"
+    copy.write_bytes(SCENARIO.read_bytes())
+    args = ["demo", "--seed", "1", "--out", str(out), "--scenario", str(copy)]
+    assert main(args) == 0
+    first = out.read_bytes()
+    assert main(args) == 0  # replacing an earlier replay is fine
+    assert out.read_bytes() == first
+    assert copy.read_bytes() == SCENARIO.read_bytes()
+    assert capsys.readouterr().err == ""
+
+
 def test_no_command_or_missing_option(capsys: pytest.CaptureFixture[str]) -> None:
     _fails([], capsys, "command")
     _fails(["demo", "--seed", "1"], capsys, "--out")

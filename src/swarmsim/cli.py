@@ -52,6 +52,7 @@ def _demo(args: argparse.Namespace) -> None:
         scenario = load(args.scenario)
     except ValueError as err:
         raise ValueError(f"scenario {args.scenario}: {_one_line(err)}") from None
+    _refuse_input(args.out, args.scenario, "scenario")
     world = run_demo(scenario, args.seed)
     _prepare(args.out)
     write(args.out, world, scenario, args.seed)
@@ -65,10 +66,15 @@ def _plot(args: argparse.Namespace) -> None:
         replay = read(args.replay)
     except ReplayError as err:
         raise ValueError(f"replay {args.replay}: {_one_line(err)}") from None
-    if args.out.exists() and args.out.samefile(args.replay):
-        raise ValueError(f"--out is the replay itself: {args.out}")
+    _refuse_input(args.out, args.replay, "replay")
     _prepare(args.out)
     plot(replay, args.out)
+
+
+def _refuse_input(out: Path, source: Path, name: str) -> None:
+    """Refuse an ``out`` that is the file just read, however either path is spelled."""
+    if out.exists() and out.samefile(source):
+        raise ValueError(f"--out is the {name} itself: {out}")
 
 
 def _prepare(out: Path) -> None:
