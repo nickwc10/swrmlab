@@ -79,7 +79,7 @@ class SegmentStore:
 
     def _eval(self, row_index: int, t_us: int) -> tuple[Vec3, Vec3]:
         row = self._rows[row_index]
-        dt = float(np.int64(t_us) - row["t0"]) / 1e6
+        dt = (t_us - int(row["t0"])) / 1e6
         pos = row["pos"] + row["vel"] * dt + row["acc"] * (0.5 * dt * dt)
         vel = row["vel"] + row["acc"] * dt
         return np.array(pos, dtype=np.float64), np.array(vel, dtype=np.float64)
