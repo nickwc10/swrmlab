@@ -113,8 +113,13 @@ def arrival_time(
     born after the wavefront has passed its birth position never gets that message (None);
     exactly at birth it receives it at birth. Valid only for the receiver's trajectory as
     currently planned (the last segment is extrapolated); callers recompute after the next
-    ``set_acc``.
-    The receiver's speed must stay below ``c`` (not checked).
+    ``set_acc``. The receiver's speed must stay below ``c`` (not checked).
+
+    The receiver's current segment is extrapolated past fuel-out, so a burning receiver's
+    imagined speed can exceed ``c`` even though its real speed cannot. The search may then
+    return None for a message that really arrives before fuel-out, and recomputing after
+    fuel-out does not recover it. Callers must therefore limit ``horizon_us`` to the
+    receiver's predicted fuel-out and repeat at each segment change.
     """
     c = _check_c(c)
     p = _point("send_pos", send_pos)
