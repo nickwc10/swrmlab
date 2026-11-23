@@ -117,9 +117,10 @@ def arrival_time(
 
     The receiver's current segment is extrapolated past fuel-out, so a burning receiver's
     imagined speed can exceed ``c`` even though its real speed cannot. The search may then
-    return None for a message that really arrives before fuel-out, and recomputing after
-    fuel-out does not recover it. Callers must therefore limit ``horizon_us`` to the
-    receiver's predicted fuel-out and repeat at each segment change.
+    return None for a message that really arrives before fuel-out. Recomputing after
+    fuel-out finds the arrival only once it is already in the past, too late for an event
+    loop to act on it. Callers must therefore limit ``horizon_us`` to the receiver's
+    predicted fuel-out and repeat at each segment change.
     """
     c = _check_c(c)
     p = _point("send_pos", send_pos)
