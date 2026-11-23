@@ -103,10 +103,20 @@ def _bounding_spheres(rocks: Rocks) -> list[_Cluster]:
 class World:
     """Units flying through rocks from time 0 to ``horizon_us``.
 
-    ``store`` must be empty; the world fills it and owns it from then on.
+    ``store`` must be empty; the world fills it and owns it from then on. ``provenance``
+    names the settings that built the world (content hash, seed, swap); the engine only
+    carries it and never reads it.
     """
 
-    def __init__(self, store: SegmentStore, rocks: Rocks, c: float = C, *, horizon_us: int) -> None:
+    def __init__(
+        self,
+        store: SegmentStore,
+        rocks: Rocks,
+        c: float = C,
+        *,
+        horizon_us: int,
+        provenance: tuple[str, int, bool] | None = None,
+    ) -> None:
         if len(store) != 0:
             raise ValueError("store must be empty")
         self.store = store
@@ -116,6 +126,7 @@ class World:
         if self.horizon_us < 0:
             raise ValueError(f"horizon_us must be >= 0, got {horizon_us}")
         self.events: list[Event] = []
+        self._provenance = provenance
         self._now = 0
         self._units: list[_Unit] = []
         self._heap: list[_Queued] = []
@@ -126,6 +137,10 @@ class World:
             (_triple(p), float(r)) for p, r in zip(rocks.centers, rocks.radii, strict=True)
         ]
         self._clusters = _bounding_spheres(rocks)
+
+    @property
+    def provenance(self) -> tuple[str, int, bool] | None:
+        return self._provenance
 
     @property
     def now_us(self) -> int:

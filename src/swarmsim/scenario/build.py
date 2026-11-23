@@ -1,6 +1,7 @@
 """Build a ready ``World`` from a scenario and a seed."""
 
 import math
+import operator
 
 import numpy as np
 from numpy.typing import NDArray
@@ -10,7 +11,7 @@ from swarmsim.core.geometry import Rocks
 from swarmsim.core.rng import Stream, uniform
 from swarmsim.core.segments import SegmentStore
 from swarmsim.scenario.maps import build_map
-from swarmsim.scenario.schema import Scenario, ShipClass, TeamSpec
+from swarmsim.scenario.schema import Scenario, ShipClass, TeamSpec, content_hash
 
 # Tries per unit before giving up. Each try is one fixed-size draw.
 ATTEMPTS = 100
@@ -101,7 +102,8 @@ def build_world(scenario: Scenario, seed: int, swap: bool = False) -> World:
     """Make the map, then spawn blue's outpost and ships, then red's.
 
     Spawn order depends only on team, so unit ids do. Positions depend only on side (west
-    0, east 1) and the seed, so with ``swap`` the two teams trade places exactly.
+    0, east 1) and the seed, so with ``swap`` the two teams trade places exactly. The world's
+    ``provenance`` records the scenario's content hash, the seed and ``swap``.
     """
     spec = scenario.map
     game_map = build_map(spec, seed, swap)
@@ -110,6 +112,7 @@ def build_world(scenario: Scenario, seed: int, swap: bool = False) -> World:
         game_map.rocks,
         scenario.c,
         horizon_us=round(scenario.duration * 1e6),
+        provenance=(content_hash(scenario), operator.index(seed), bool(swap)),
     )
     blue_side = 1 if swap else 0
     teams = (

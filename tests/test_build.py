@@ -170,6 +170,15 @@ def test_same_seed_same_world_and_different_seeds_differ() -> None:
     assert not np.array_equal(a.rocks.centers, c.rocks.centers)
 
 
+def test_a_built_world_carries_the_settings_that_made_it() -> None:
+    s = scenario()
+    for seed, swap in ((4, False), (4, True), (2**63 - 1, False)):
+        assert build_world(s, seed, swap).provenance == (content_hash(s), seed, swap)
+    stamp = build_world(s, np.int64(4)).provenance  # type: ignore[arg-type]
+    assert stamp is not None
+    assert [type(x) for x in stamp] == [str, int, bool]
+
+
 def test_a_built_world_runs() -> None:
     w = build_world(scenario(), 1)
     w.run_until(w.horizon_us)

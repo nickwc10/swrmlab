@@ -91,6 +91,16 @@ def test_light_speed_defaults_to_c() -> None:
     assert World(SegmentStore(), rocks(), horizon_us=10).c == C
 
 
+def test_provenance_is_none_by_default_and_set_only_at_construction() -> None:
+    assert make_world().provenance is None
+    stamp = ("abc", 7, True)
+    w = World(SegmentStore(), rocks(), horizon_us=10, provenance=stamp)
+    assert w.provenance == stamp
+    with pytest.raises(AttributeError):
+        w.provenance = None  # type: ignore[misc]
+    assert w.provenance == stamp
+
+
 def test_event_is_frozen_with_json_safe_data() -> None:
     w = make_world(rocks((1000.0, 0.0, 0.0, 50.0)))
     u = spawn(w, vel=(1.0, 0.0, 0.0), fuel_mass=1.0)

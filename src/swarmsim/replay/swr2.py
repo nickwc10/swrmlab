@@ -94,6 +94,18 @@ def _check_seed(seed: int) -> int:
     return s
 
 
+def _check_provenance(world: World, scenario: Scenario, seed: int, swap: bool) -> None:
+    """Raise ValueError unless ``world`` was stamped with these settings when it was built."""
+    if world.provenance is None:
+        raise ValueError("world has no provenance: only a world made by build_world can be written")
+    given = (content_hash(scenario), seed, swap)
+    for name, built, want in zip(
+        ("scenario hash", "seed", "swap"), world.provenance, given, strict=True
+    ):
+        if built != want:
+            raise ValueError(f"{name} is {want}, but the world was built with {built}")
+
+
 def _check_identity(world: World, scenario: Scenario, seed: int, swap: bool) -> None:
     """Raise ValueError unless ``world`` is what ``build_world(scenario, seed, swap)`` makes
     (plus any units added later), so the header cannot name a different run."""
@@ -127,10 +139,12 @@ def write(
 ) -> None:
     """Write ``world``'s run to ``path``, atomically.
 
-    ``scenario``, ``seed`` and ``swap`` must be what built the world; they are stored so the
-    starting world can be rebuilt with ``build_world``.
+    ``scenario``, ``seed`` and ``swap`` must be what built the world (its ``provenance``);
+    they are stored so the starting world can be rebuilt with ``build_world``.
     """
     seed = _check_seed(seed)
+    swap = bool(swap)
+    _check_provenance(world, scenario, seed, swap)
     _check_identity(world, scenario, seed, swap)
     table = world.store.table()
     seg_dtype = _dtype_from_spec(_SEGMENT_SPEC)
@@ -143,7 +157,7 @@ def write(
         "scenario": scenario.model_dump(mode="json"),
         "scenario_hash": content_hash(scenario),
         "seed": seed,
-        "swap": bool(swap),
+        "swap": swap,
         "horizon_us": world.horizon_us,
         "units": [
             {"id": i, "team": team, "cls": cls, "birth": birth, "end": end}

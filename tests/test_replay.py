@@ -12,6 +12,7 @@ import pytest
 
 from swarmsim import SIM_VERSION
 from swarmsim.core.engine import World
+from swarmsim.core.segments import SegmentStore
 from swarmsim.replay import Replay, ReplayError, read, write
 from swarmsim.scenario.build import build_world
 from swarmsim.scenario.schema import Scenario, content_hash, load
@@ -633,7 +634,7 @@ def test_write_rejects_arguments_that_do_not_describe_the_world(tmp_path: Path) 
         write(target, w, s, 2)
     with pytest.raises(ValueError, match="swap"):
         write(target, w, s, 1, swap=True)
-    with pytest.raises(ValueError, match="horizon"):
+    with pytest.raises(ValueError, match="scenario"):
         write(target, w, small_scenario(duration=7200.0), 1)
     for bad in (-1, 2**63, 2**64):
         with pytest.raises(ValueError, match="seed"):
@@ -642,17 +643,74 @@ def test_write_rejects_arguments_that_do_not_describe_the_world(tmp_path: Path) 
     write(target, w, s, 1)  # the right arguments still work
 
 
-def test_write_names_what_differs_in_the_starting_units(tmp_path: Path) -> None:
+def forge(world: World, like: World) -> World:
+    """Give ``world`` another world's stamp, so a write reaches the rebuild check."""
+    world._provenance = like.provenance
+    return world
+
+
+def copy_by_hand(world: World, s: Scenario, horizon_us: int) -> World:
+    """The same starting units and rocks as a fresh ``world``, put together without build_world."""
+    out = World(SegmentStore(), world.rocks, world.c, horizon_us=horizon_us)
+    for unit, team, cls, birth, _end in world.units:
+        spec = s.blue.outpost if cls == "outpost" else s.ship_classes[cls]
+        pos, vel = world.store.state(unit, birth)
+        out.spawn(birth, pos, vel, team=team, cls=cls, **spec.model_dump())
+    return out
+
+
+CHANGES = {"fuel_mass": 501.0, "max_acc": 2.0, "ve": 2e4, "dry_mass": 101.0, "radius": 6.0}
+
+
+@pytest.mark.parametrize("field", [*CHANGES, "name"])
+def test_write_refuses_a_scenario_that_differs_in_one_setting(tmp_path: Path, field: str) -> None:
+    w, s = make_run()
+    d = s.model_dump()
+    if field == "name":
+        d["name"] = "other"
+    else:
+        d["ship_classes"]["scout"][field] = CHANGES[field]
+    other = Scenario.model_validate(d)
+    target = tmp_path / "a.swr"
+    target.write_bytes(b"keep me")
+    with pytest.raises(ValueError, match="scenario"):
+        write(target, w, other, 1)
+    assert target.read_bytes() == b"keep me"
+    assert list(tmp_path.iterdir()) == [target]
+    write(target, w, s, 1)  # the scenario it was built from is accepted
+    assert read(target).scenario == s
+
+
+def test_write_refuses_a_hand_made_world(tmp_path: Path) -> None:
+    s = small_scenario()
+    built = build_world(s, 1)
+    target = tmp_path / "a.swr"
+    target.write_bytes(b"keep me")
+    with pytest.raises(ValueError, match="no provenance"):
+        write(target, copy_by_hand(built, s, built.horizon_us), s, 1)
+    assert target.read_bytes() == b"keep me"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_write_still_rebuilds_and_compares_when_the_stamp_matches(tmp_path: Path) -> None:
     s = small_scenario()
     w = build_world(s, 1)
     w.command_acc(1, 0, (1.0, 0.0, 0.0))  # a command at birth only changes acceleration
     w.run_until(w.horizon_us)
     write(tmp_path / "ok.swr", w, s, 1)
+    target = tmp_path / "bad.swr"
+    with pytest.raises(ValueError, match="horizon"):
+        write(target, forge(copy_by_hand(w, s, w.horizon_us - 1), w), s, 1)
+    with pytest.raises(ValueError, match="rock centers"):
+        write(target, forge(build_world(s, 2), w), s, 1)
+    with pytest.raises(ValueError, match="unit 0 starts"):
+        write(target, forge(build_world(s, 1, swap=True), w), s, 1)
     team = s.blue.model_dump()
     team["groups"][0]["initial_speed"] = 50.0  # same map and rocks, different start velocity
     other = build_world(s.model_copy(update={"blue": type(s.blue).model_validate(team)}), 1)
     with pytest.raises(ValueError, match="unit 1 starts"):
-        write(tmp_path / "bad.swr", other, s, 1)
+        write(target, forge(other, w), s, 1)
+    assert not target.exists()
 
 
 def test_write_allows_units_launched_after_the_start(tmp_path: Path) -> None:
