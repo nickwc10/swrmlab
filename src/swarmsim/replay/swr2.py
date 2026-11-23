@@ -42,6 +42,7 @@ from numpy.typing import NDArray
 from swarmsim import SIM_VERSION
 from swarmsim.core.engine import Event, World
 from swarmsim.core.geometry import Rocks
+from swarmsim.core.rng import KEY_LIMIT
 from swarmsim.core.segments import Vec3, _time, evaluate_segment
 from swarmsim.scenario.build import build_world
 from swarmsim.scenario.schema import Scenario, content_hash
@@ -62,8 +63,6 @@ _MAX_FIELDS = 64
 _MAX_SHAPE_ELEMENTS = 1 << 16
 _T_LIMIT = 2**61  # same bound the segment store puts on times
 _DIGEST = 32
-# Seeds at or above 2**63 collide in the RNG streams, so they are not accepted.
-_SEED_LIMIT = 2**63
 _CLUSTER_LIMIT = 2**31
 
 
@@ -90,7 +89,7 @@ def _canonical(header: dict[str, Any]) -> bytes:
 
 def _check_seed(seed: int) -> int:
     s = operator.index(seed)
-    if not 0 <= s < _SEED_LIMIT:
+    if not 0 <= s < KEY_LIMIT:
         raise ValueError(f"seed {s} must satisfy 0 <= seed < 2**63")
     return s
 
@@ -398,7 +397,7 @@ def _parse(file: bytes) -> Replay:
     if _int(header.get("version"), "version") != VERSION:
         _fail(f"unsupported version {header.get('version')}, expected {VERSION}")
     _str(_field(header, "sim_version"), "sim_version")
-    if not 0 <= _int(_field(header, "seed"), "seed") < _SEED_LIMIT:
+    if not 0 <= _int(_field(header, "seed"), "seed") < KEY_LIMIT:
         _fail("seed is out of range")
     if not isinstance(_field(header, "swap"), bool):
         _fail("swap must be a boolean")
