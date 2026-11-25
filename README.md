@@ -1,4 +1,4 @@
-# swrmlab-sim
+# swrmlab
 
 A deterministic simulator for autonomous space battles, with tools to analyze the tactics that
 decide them.
@@ -10,6 +10,7 @@ saved as replays. There is no sensing, no weapons and no tactics yet.
 
 - Independent open-source research.
 - Findings are claims about the simulated world. They are not evidence about real systems.
+- Contributions are welcome. See CONTRIBUTING.md.
 
 ## Setup
 
