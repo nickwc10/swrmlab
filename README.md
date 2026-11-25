@@ -9,10 +9,7 @@ saved as replays. There is no sensing, no weapons and no tactics yet.
 ## About
 
 - Independent open-source research.
-- Built only from publicly available information.
-- All units are fictional and generic.
 - Findings are claims about the simulated world. They are not evidence about real systems.
-- Contributions are not accepted. See CONTRIBUTING.md for how to report bugs.
 
 ## Setup
 
@@ -33,7 +30,7 @@ uv run swarmsim demo --seed 1 --out data/replays/demo_seed1.swr
 uv run swarmsim plot data/replays/demo_seed1.swr --out data/renders/demo_seed1.png
 ```
 
-The same seed gives the same replay file, byte for byte, on one platform with the locked
+The same seed gives the same replay file, on one platform with the locked
 dependencies. `--scenario FILE` picks another scenario; the default is
 `scenarios/two_outposts.yaml` in the current folder. The demo does not steer around rocks between
 the two home clusters, so on a few seeds a ship hits one.
